@@ -1,0 +1,7 @@
+Archetype,Subtype,Dopamine,Serotonin,Norepinephrine,Glutamate,GABA,Oxytocin,Vasopressin,FrequencyHz,BrainwaveBand,ArchetypeFunction
+Witches,Bipolar Disorder,"(+ during mania, - during depression)",(-),"(+ during mania, - during depression)",(+),(-),(normal),(normal),7.83,Alpha/Theta,"Emotional rhythm, intensity, creativity, phase-shifting"
+Witches,Borderline Personality Disorder (BPD),(-),(-),(-),(normal),(-),(normal),(normal),7.83,Alpha/Theta,"Attachment sensitivity, emotional flooding, boundary permeability"
+Androids,High-Functioning Autism,(+/- depending on symptoms),"(+ in some, - in others)",(normal),(+),(-),(-),(-),14.3,Low Beta,"Pattern detection, systemization, sensory precision, structured cognition"
+Androids,ADHD / ADD,(-),(-),(-),(normal),(normal),(normal),(normal),14.3,Low Beta,"Salience switching, novelty seeking, attention variability"
+Androids,OCD,(+),(-),(normal),(+),(-),(normal),(normal),14.3,Low Beta,"Uncertainty compression, checking loops, threat prediction"
+Mystics,High-Functioning Schizophrenia,"(+ in some areas, - in others)",(-),(normal),(+),(-),(normal),(normal),33.8,Gamma,"Symbolic abstraction, reality-model instability, salience expansion"
