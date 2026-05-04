@@ -1,47 +1,51 @@
 #!/usr/bin/env python3
 """
-Triadic Archetype Neurochemical Atlas
-=====================================
+atlas.py
+========
 
-Enhanced version of the original Plotly network.
+Builds an interactive Plotly 3D atlas from:
 
-Core upgrade:
-- Replaces random coordinates with theory-driven coordinates:
-    X = Precision axis 𝒫
-    Y = Boundary axis ℬ
-    Z = Temporal axis 𝒯
+    data/archetypes.csv
+    data/triadic_coordinates.csv
+    data/treatment_vectors.csv
 
-- Uses neurotransmitter/hormone dysregulation as biological metadata.
-- Computes severity as Euclidean distance from healthy origin.
-- Computes comorbidity/overlap proximity from distance in 𝒫-ℬ-𝒯 space.
-- Builds two edge layers:
-    1. Neurochemical edges: disorder/archetype -> neurotransmitter/hormone
-    2. Similarity edges: disorder/archetype -> disorder/archetype
+Output:
+    index.html
 
 Run:
-    python3 triadic_archetype_atlas.py
-
-Requires:
-    pip install pandas numpy plotly
+    python3 src/atlas.py
 """
 
-import os
+from __future__ import annotations
+
 import math
-import http.server
-import socketserver
+import os
 from dataclasses import dataclass
+from pathlib import Path
+from typing import Dict, List
 
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 
+from theory import (
+    severity,
+    distance,
+    overlap_score,
+    treatment_response_score,
+    axis_interpretation,
+    dysregulation_score,
+    is_dysregulated,
+)
 
-# ============================================================
-# 1. CONFIG
-# ============================================================
 
-DEFAULT_CSV = "Neurotransmitter_Dysregulation_in_Archetypes.csv"
-DEFAULT_OUTPUT = "index.html"
+ROOT = Path(__file__).resolve().parent.parent
+
+DATA_DIR = ROOT / "data"
+ARCHETYPES_CSV = DATA_DIR / "archetypes.csv"
+COORDINATES_CSV = DATA_DIR / "triadic_coordinates.csv"
+TREATMENTS_CSV = DATA_DIR / "treatment_vectors.csv"
+OUTPUT_HTML = ROOT / "index.html"
 
 TRANSMITTER_COLS = [
     "Dopamine",
@@ -62,6 +66,7 @@ ARCHETYPE_COLORS = {
     "Witches": "#ff4d4d",
     "Androids": "#38d46b",
     "Mystics": "#4d7dff",
+    "Clinical": "#d9d9d9",
 }
 
 NH_COLORS = {
@@ -74,251 +79,6 @@ NH_COLORS = {
     "Vasopressin": "#ffd000",
 }
 
-# 𝒫, ℬ, 𝒯 coordinates from the imported triadic theory.
-# These are theory coordinates, not clinical diagnoses.
-TRIADIC_COORDINATES = {
-    "Bipolar Disorder": {
-        "P": 2.0,
-        "B": -1.0,
-        "T": 3.0,
-        "mode": "Mania-weighted bipolar state",
-        "axis_note": "High precision/reward salience, porous boundary, expanded future horizon.",
-    },
-    "Borderline Personality Disorder (BPD)": {
-        "P": 0.0,
-        "B": -2.0,
-        "T": 0.0,
-        "mode": "Chaotic precision / porous boundary",
-        "axis_note": "Precision oscillates rapidly; boundary becomes porous under emotional intensity.",
-    },
-    "High-Functioning Autism": {
-        "P": 1.0,
-        "B": 2.0,
-        "T": 0.0,
-        "mode": "Rigid social boundary / high local precision",
-        "axis_note": "Local-detail precision and strong self/world boundary; sensory boundary may vary.",
-    },
-    "ADHD / ADD": {
-        "P": -2.0,
-        "B": 0.0,
-        "T": 0.0,
-        "mode": "Low precision / present-locked salience",
-        "axis_note": "Attention precision drops; immediate salience dominates planning horizon.",
-    },
-    "OCD": {
-        "P": 1.5,
-        "B": 1.0,
-        "T": 2.0,
-        "mode": "Doubt precision / future threat loop",
-        "axis_note": "High precision assigned to doubt, contamination, error, or future harm.",
-    },
-    "High-Functioning Schizophrenia": {
-        "P": 2.0,
-        "B": -2.0,
-        "T": 0.0,
-        "mode": "Aberrant precision / dissolved boundary",
-        "axis_note": "Noise becomes signal; self/world boundary can become unstable.",
-    },
-}
-
-
-# Optional archetype frequency layer from your existing README.
-ARCHETYPE_FREQUENCIES = {
-    "Witches": {
-        "frequency_hz": 7.83,
-        "band": "Alpha/Theta",
-        "description": "Grounding, emotional rhythm, intuitive integration.",
-    },
-    "Androids": {
-        "frequency_hz": 14.3,
-        "band": "Low Beta",
-        "description": "Focus, structure, problem-solving, executive control.",
-    },
-    "Mystics": {
-        "frequency_hz": 33.8,
-        "band": "Gamma",
-        "description": "Abstraction, symbolic synthesis, high-order cognition.",
-    },
-}
-
-
-TREATMENT_HINTS = {
-    "Bipolar Disorder": [
-        "Stabilize oscillation before pushing cognition harder.",
-        "Protect sleep/circadian rhythm.",
-        "Mood-stability vector should dampen precision spikes.",
-    ],
-    "Borderline Personality Disorder (BPD)": [
-        "Boundary-strengthening is the primary axis target.",
-        "DBT-style skills map well to ℬ stabilization.",
-        "Mindfulness helps stabilize chaotic 𝒫 oscillation.",
-    ],
-    "High-Functioning Autism": [
-        "Reduce sensory overload and improve translation across boundaries.",
-        "Support structure rather than forcing social permeability.",
-        "Use predictable routines as boundary-safe scaffolding.",
-    ],
-    "ADHD / ADD": [
-        "Increase useful precision without overloading the system.",
-        "Externalize time: reminders, timers, task boards.",
-        "Reward shaping can extend temporal horizon.",
-    ],
-    "OCD": [
-        "Reduce overprecision of threat/doubt loops.",
-        "Exposure/response prevention maps to precision recalibration.",
-        "Future-threat loops need uncertainty tolerance training.",
-    ],
-    "High-Functioning Schizophrenia": [
-        "Reduce aberrant salience and protect boundaries.",
-        "Reality-testing should be gentle, structured, and non-shaming.",
-        "Stress reduction reduces boundary permeability collapse.",
-    ],
-}
-
-
-# ============================================================
-# 2. HELPERS
-# ============================================================
-
-def clean_value(value):
-    if pd.isna(value):
-        return ""
-    return str(value).strip()
-
-
-def is_dysregulated(value):
-    value = clean_value(value).lower()
-    return value not in ("", "normal", "nan")
-
-
-def dysregulation_score(value):
-    """
-    Converts symbolic dysregulation text into a rough strength score.
-
-    This is not clinical measurement.
-    It is a visualization heuristic.
-
-    Examples:
-        "(+)" -> 1
-        "(-)" -> 1
-        "(+ during mania, - during depression)" -> 2
-        "(+/- depending on symptoms)" -> 2
-    """
-    value = clean_value(value).lower()
-
-    if not value or value == "normal":
-        return 0.0
-
-    score = 0.0
-
-    if "+" in value:
-        score += 1.0
-    if "-" in value:
-        score += 1.0
-    if "mania" in value or "depression" in value:
-        score += 0.5
-    if "depending" in value or "some" in value or "+/-" in value:
-        score += 0.5
-
-    return max(score, 1.0)
-
-
-def severity_from_coord(p, b, t):
-    return math.sqrt(p * p + b * b + t * t)
-
-
-def euclidean_distance(a, b):
-    return math.sqrt(
-        (a["P"] - b["P"]) ** 2 +
-        (a["B"] - b["B"]) ** 2 +
-        (a["T"] - b["T"]) ** 2
-    )
-
-
-def comorbidity_probability(distance, sigma=1.5):
-    """
-    Geometric overlap model:
-        P_overlap ≈ exp(-d / sigma)
-
-    This is a visualization heuristic.
-    """
-    return math.exp(-distance / sigma)
-
-
-def axis_interpretation(p, b, t):
-    p_note = (
-        "high precision / salience" if p > 1
-        else "low precision / signal loss" if p < -1
-        else "balanced or oscillatory precision"
-    )
-
-    b_note = (
-        "rigid boundary" if b > 1
-        else "porous/dissolved boundary" if b < -1
-        else "moderate boundary"
-    )
-
-    t_note = (
-        "future-locked" if t > 1
-        else "past-locked" if t < -1
-        else "present-centered / neutral horizon"
-    )
-
-    return p_note, b_note, t_note
-
-
-def make_hover_text(row, coord):
-    archetype = clean_value(row["Archetype"])
-    subtype = clean_value(row["Subtype"])
-
-    p, b, t = coord["P"], coord["B"], coord["T"]
-    severity = severity_from_coord(p, b, t)
-
-    p_note, b_note, t_note = axis_interpretation(p, b, t)
-
-    nh_lines = []
-    nh_score_total = 0.0
-
-    for col in ALL_NH_COLS:
-        value = clean_value(row.get(col, ""))
-        if value:
-            nh_lines.append(f"{col}: {value}")
-            nh_score_total += dysregulation_score(value)
-
-    freq = ARCHETYPE_FREQUENCIES.get(archetype, {})
-    freq_line = ""
-    if freq:
-        freq_line = (
-            f"<br><br><b>Archetype Frequency Layer</b>"
-            f"<br>{freq['frequency_hz']} Hz — {freq['band']}"
-            f"<br>{freq['description']}"
-        )
-
-    hints = TREATMENT_HINTS.get(subtype, [])
-    hint_html = ""
-    if hints:
-        hint_html = "<br>".join([f"• {h}" for h in hints])
-
-    return (
-        f"<b>{archetype} — {subtype}</b>"
-        f"<br><br><b>Triadic Coordinates</b>"
-        f"<br>𝒫 Precision: {p:+.2f} — {p_note}"
-        f"<br>ℬ Boundary: {b:+.2f} — {b_note}"
-        f"<br>𝒯 Temporal: {t:+.2f} — {t_note}"
-        f"<br>Severity distance from origin: {severity:.2f}"
-        f"<br><br><b>Mode</b><br>{coord.get('mode', '')}"
-        f"<br><br><b>Axis Note</b><br>{coord.get('axis_note', '')}"
-        f"<br><br><b>Neurochemical Layer</b><br>" +
-        "<br>".join(nh_lines) +
-        f"<br>Total dysregulation load: {nh_score_total:.2f}"
-        f"{freq_line}"
-        f"<br><br><b>Computational Treatment Hints</b><br>{hint_html}"
-    )
-
-
-# ============================================================
-# 3. DATA MODEL
-# ============================================================
 
 @dataclass
 class Node:
@@ -343,48 +103,223 @@ class Edge:
     edge_type: str
 
 
-# ============================================================
-# 4. BUILD GRAPH
-# ============================================================
+def clean(value) -> str:
+    if pd.isna(value):
+        return ""
+    return str(value).strip()
 
-def build_nodes_and_edges(df):
-    df.columns = df.columns.str.strip()
 
-    nodes = []
-    edges = []
-    node_lookup = {}
+def load_data():
+    for path in [ARCHETYPES_CSV, COORDINATES_CSV, TREATMENTS_CSV]:
+        if not path.exists():
+            raise FileNotFoundError(f"Missing file: {path}")
+
+    archetypes = pd.read_csv(ARCHETYPES_CSV)
+    coords = pd.read_csv(COORDINATES_CSV)
+    treatments = pd.read_csv(TREATMENTS_CSV)
+
+    archetypes.columns = archetypes.columns.str.strip()
+    coords.columns = coords.columns.str.strip()
+    treatments.columns = treatments.columns.str.strip()
+
+    return archetypes, coords, treatments
+
+
+def build_coordinate_lookup(coords: pd.DataFrame) -> Dict[str, Dict]:
+    lookup = {}
+
+    for _, row in coords.iterrows():
+        subtype = clean(row["Subtype"])
+
+        lookup[subtype] = {
+            "P": float(row["P"]),
+            "B": float(row["B"]),
+            "T": float(row["T"]),
+            "Mode": clean(row["Mode"]),
+            "AxisNote": clean(row["AxisNote"]),
+        }
+
+    return lookup
+
+
+def build_treatment_lookup(treatments: pd.DataFrame) -> Dict[str, Dict]:
+    lookup = {}
+
+    for _, row in treatments.iterrows():
+        treatment = clean(row["Treatment"])
+
+        lookup[treatment] = {
+            "P": float(row["DeltaP"]),
+            "B": float(row["DeltaB"]),
+            "T": float(row["DeltaT"]),
+            "Mechanism": clean(row["Mechanism"]),
+            "PrimaryTargets": clean(row["PrimaryTargets"]),
+        }
+
+    return lookup
+
+
+def best_treatments_for_subtype(coord: Dict, treatment_lookup: Dict, limit: int = 3):
+    scored = []
+
+    for name, vector in treatment_lookup.items():
+        score = treatment_response_score(coord, vector)
+        scored.append((name, score, vector))
+
+    scored.sort(key=lambda item: item[1], reverse=True)
+    return scored[:limit]
+
+
+def make_archetype_hover(row, coord, treatment_lookup):
+    archetype = clean(row["Archetype"])
+    subtype = clean(row["Subtype"])
+
+    p = coord["P"]
+    b = coord["B"]
+    t = coord["T"]
+
+    sev = severity(p, b, t)
+    p_note, b_note, t_note = axis_interpretation(p, b, t)
+
+    nh_lines = []
+    load = 0.0
+
+    for col in ALL_NH_COLS:
+        value = clean(row.get(col, ""))
+        if value:
+            nh_lines.append(f"{col}: {value}")
+            load += dysregulation_score(value)
+
+    frequency = clean(row.get("FrequencyHz", ""))
+    band = clean(row.get("BrainwaveBand", ""))
+    function = clean(row.get("ArchetypeFunction", ""))
+
+    best = best_treatments_for_subtype(coord, treatment_lookup, limit=3)
+    treatment_lines = [
+        f"{name}: match {score:.2f}<br><i>{vector['Mechanism']}</i>"
+        for name, score, vector in best
+    ]
+
+    return (
+        f"<b>{archetype} — {subtype}</b>"
+        f"<br><br><b>Triadic Coordinates</b>"
+        f"<br>𝒫 Precision: {p:+.2f} — {p_note}"
+        f"<br>ℬ Boundary: {b:+.2f} — {b_note}"
+        f"<br>𝒯 Temporal: {t:+.2f} — {t_note}"
+        f"<br>Severity distance: {sev:.2f}"
+        f"<br><br><b>Mode</b><br>{coord['Mode']}"
+        f"<br><br><b>Axis Note</b><br>{coord['AxisNote']}"
+        f"<br><br><b>Neurochemical Layer</b><br>{'<br>'.join(nh_lines)}"
+        f"<br>Total dysregulation load: {load:.2f}"
+        f"<br><br><b>Archetype Frequency</b>"
+        f"<br>{frequency} Hz — {band}"
+        f"<br>{function}"
+        f"<br><br><b>Best-Matching Treatment Vectors</b><br>"
+        f"{'<br><br>'.join(treatment_lines)}"
+    )
+
+
+def build_nodes_and_edges(archetypes, coords, treatments):
+    coordinate_lookup = build_coordinate_lookup(coords)
+    treatment_lookup = build_treatment_lookup(treatments)
+
+    nodes: List[Node] = []
+    edges: List[Edge] = []
+    node_lookup: Dict[str, Node] = {}
 
     # --------------------------------------------------------
-    # A) Archetype / subtype nodes in 𝒫-ℬ-𝒯 space
+    # 1. Archetype subtype nodes
     # --------------------------------------------------------
-    for _, row in df.iterrows():
-        archetype = clean_value(row["Archetype"])
-        subtype = clean_value(row["Subtype"])
-        node_id = f"AS::{archetype}::{subtype}"
+    for _, row in archetypes.iterrows():
+        archetype = clean(row["Archetype"])
+        subtype = clean(row["Subtype"])
 
-        if subtype not in TRIADIC_COORDINATES:
-            print(f"[WARN] No triadic coordinate for subtype: {subtype}")
+        if subtype not in coordinate_lookup:
+            print(f"[WARN] No coordinate found for subtype: {subtype}")
             continue
 
-        coord = TRIADIC_COORDINATES[subtype]
+        coord = coordinate_lookup[subtype]
 
-        p, b, t = coord["P"], coord["B"], coord["T"]
-        severity = severity_from_coord(p, b, t)
+        p = coord["P"]
+        b = coord["B"]
+        t = coord["T"]
 
+        sev = severity(p, b, t)
         color = ARCHETYPE_COLORS.get(archetype, "#999999")
-        size = 12 + severity * 4
+        size = 12 + sev * 4
 
-        hover = make_hover_text(row, coord)
+        node_id = f"AS::{archetype}::{subtype}"
 
         node = Node(
             node_id=node_id,
             label=subtype,
-            node_type="archetype_subtype",
+            node_type="archetype",
             x=p,
             y=b,
             z=t,
             color=color,
             size=size,
+            hover=make_archetype_hover(row, coord, treatment_lookup),
+        )
+
+        nodes.append(node)
+        node_lookup[node_id] = node
+
+    # --------------------------------------------------------
+    # 2. Extra coordinate-only clinical nodes
+    # --------------------------------------------------------
+    existing_subtypes = set(archetypes["Subtype"].astype(str).str.strip())
+
+    for _, row in coords.iterrows():
+        subtype = clean(row["Subtype"])
+
+        if subtype in existing_subtypes:
+            continue
+
+        p = float(row["P"])
+        b = float(row["B"])
+        t = float(row["T"])
+        sev = severity(p, b, t)
+
+        coord = {
+            "P": p,
+            "B": b,
+            "T": t,
+            "Mode": clean(row["Mode"]),
+            "AxisNote": clean(row["AxisNote"]),
+        }
+
+        p_note, b_note, t_note = axis_interpretation(p, b, t)
+
+        best = best_treatments_for_subtype(coord, treatment_lookup, limit=3)
+        treatment_lines = [
+            f"{name}: match {score:.2f}<br><i>{vector['Mechanism']}</i>"
+            for name, score, vector in best
+        ]
+
+        hover = (
+            f"<b>Clinical Coordinate — {subtype}</b>"
+            f"<br><br>𝒫 Precision: {p:+.2f} — {p_note}"
+            f"<br>ℬ Boundary: {b:+.2f} — {b_note}"
+            f"<br>𝒯 Temporal: {t:+.2f} — {t_note}"
+            f"<br>Severity distance: {sev:.2f}"
+            f"<br><br><b>Mode</b><br>{coord['Mode']}"
+            f"<br><br><b>Axis Note</b><br>{coord['AxisNote']}"
+            f"<br><br><b>Best-Matching Treatment Vectors</b><br>"
+            f"{'<br><br>'.join(treatment_lines)}"
+        )
+
+        node_id = f"CLINICAL::{subtype}"
+
+        node = Node(
+            node_id=node_id,
+            label=subtype,
+            node_type="clinical",
+            x=p,
+            y=b,
+            z=t,
+            color=ARCHETYPE_COLORS["Clinical"],
+            size=9 + sev * 3,
             hover=hover,
         )
 
@@ -392,43 +327,38 @@ def build_nodes_and_edges(df):
         node_lookup[node_id] = node
 
     # --------------------------------------------------------
-    # B) Neurotransmitter/hormone nodes
-    # Place these outside the disorder atlas as satellites.
+    # 3. Neurotransmitter/hormone satellite nodes
     # --------------------------------------------------------
-    nh_angle_step = 2 * math.pi / len(ALL_NH_COLS)
-    nh_radius = 4.5
+    angle_step = 2 * math.pi / len(ALL_NH_COLS)
+    radius = 4.8
 
     for i, col in enumerate(ALL_NH_COLS):
-        if col not in df.columns:
+        if col not in archetypes.columns:
             continue
 
-        appears = any(is_dysregulated(v) for v in df[col].values)
+        appears = any(is_dysregulated(v) for v in archetypes[col].values)
+
         if not appears:
             continue
 
-        angle = i * nh_angle_step
+        angle = i * angle_step
+        z = -3.6 if col in TRANSMITTER_COLS else 3.6
 
-        # Neurochemical nodes form a ring around the theory-space.
-        x = nh_radius * math.cos(angle)
-        y = nh_radius * math.sin(angle)
-        z = -3.5 if col in TRANSMITTER_COLS else 3.5
-
-        node_type = "neurotransmitter" if col in TRANSMITTER_COLS else "hormone"
         node_id = f"NH::{col}"
 
         node = Node(
             node_id=node_id,
             label=col,
-            node_type=node_type,
-            x=x,
-            y=y,
+            node_type="neurochemical",
+            x=radius * math.cos(angle),
+            y=radius * math.sin(angle),
             z=z,
             color=NH_COLORS.get(col, "#cccccc"),
-            size=10 if node_type == "neurotransmitter" else 12,
+            size=10,
             hover=(
                 f"<b>{col}</b>"
-                f"<br>Type: {node_type}"
-                f"<br>Connected when subtype has non-normal dysregulation."
+                f"<br>Layer: neurotransmitter/hormone"
+                f"<br>Connected when non-normal dysregulation appears."
             ),
         )
 
@@ -436,85 +366,146 @@ def build_nodes_and_edges(df):
         node_lookup[node_id] = node
 
     # --------------------------------------------------------
-    # C) AS -> NH edges
+    # 4. Treatment vector nodes
     # --------------------------------------------------------
-    for _, row in df.iterrows():
-        archetype = clean_value(row["Archetype"])
-        subtype = clean_value(row["Subtype"])
+    for treatment, vector in treatment_lookup.items():
+        node_id = f"TX::{treatment}"
+
+        node = Node(
+            node_id=node_id,
+            label=treatment,
+            node_type="treatment",
+            x=vector["P"],
+            y=vector["B"],
+            z=vector["T"],
+            color="#00ffff",
+            size=8,
+            hover=(
+                f"<b>Treatment Vector — {treatment}</b>"
+                f"<br>Δ𝒫: {vector['P']:+.2f}"
+                f"<br>Δℬ: {vector['B']:+.2f}"
+                f"<br>Δ𝒯: {vector['T']:+.2f}"
+                f"<br><br><b>Mechanism</b><br>{vector['Mechanism']}"
+                f"<br><br><b>Targets</b><br>{vector['PrimaryTargets']}"
+            ),
+        )
+
+        nodes.append(node)
+        node_lookup[node_id] = node
+
+    # --------------------------------------------------------
+    # 5. Neurochemical edges
+    # --------------------------------------------------------
+    for _, row in archetypes.iterrows():
+        archetype = clean(row["Archetype"])
+        subtype = clean(row["Subtype"])
         source_id = f"AS::{archetype}::{subtype}"
 
         if source_id not in node_lookup:
             continue
 
         for col in ALL_NH_COLS:
-            value = clean_value(row.get(col, ""))
+            value = clean(row.get(col, ""))
+
             if not is_dysregulated(value):
                 continue
 
             target_id = f"NH::{col}"
+
             if target_id not in node_lookup:
                 continue
 
             strength = dysregulation_score(value)
 
-            edges.append(Edge(
-                source=source_id,
-                target=target_id,
-                label=f"{subtype} → {col}: {value}",
-                color="rgba(160,160,160,0.35)",
-                width=1.0 + strength,
-                edge_type="neurochemical",
-            ))
+            edges.append(
+                Edge(
+                    source=source_id,
+                    target=target_id,
+                    label=f"{subtype} → {col}: {value}",
+                    color="rgba(170,170,170,0.32)",
+                    width=1.0 + strength,
+                    edge_type="neurochemical",
+                )
+            )
 
     # --------------------------------------------------------
-    # D) AS -> AS similarity/comorbidity edges
+    # 6. Similarity edges between archetype/clinical nodes
     # --------------------------------------------------------
-    as_nodes = [n for n in nodes if n.node_type == "archetype_subtype"]
+    theory_nodes = [
+        n for n in nodes
+        if n.node_type in ("archetype", "clinical")
+    ]
 
-    for i in range(len(as_nodes)):
-        for j in range(i + 1, len(as_nodes)):
-            n1 = as_nodes[i]
-            n2 = as_nodes[j]
+    for i in range(len(theory_nodes)):
+        for j in range(i + 1, len(theory_nodes)):
+            n1 = theory_nodes[i]
+            n2 = theory_nodes[j]
 
             c1 = {"P": n1.x, "B": n1.y, "T": n1.z}
             c2 = {"P": n2.x, "B": n2.y, "T": n2.z}
 
-            d = euclidean_distance(c1, c2)
-            overlap = comorbidity_probability(d)
+            d = distance(c1, c2)
+            overlap = overlap_score(d)
 
-            # Only draw meaningful overlaps.
             if overlap < 0.12:
                 continue
 
-            edges.append(Edge(
-                source=n1.node_id,
-                target=n2.node_id,
-                label=(
-                    f"Theory-space proximity"
-                    f"<br>{n1.label} ↔ {n2.label}"
-                    f"<br>Distance: {d:.2f}"
-                    f"<br>Overlap score: {overlap:.2f}"
-                ),
-                color="rgba(255,255,255,0.35)",
-                width=1.0 + overlap * 5.0,
-                edge_type="triadic_similarity",
-            ))
+            edges.append(
+                Edge(
+                    source=n1.node_id,
+                    target=n2.node_id,
+                    label=(
+                        f"<b>Theory-space proximity</b>"
+                        f"<br>{n1.label} ↔ {n2.label}"
+                        f"<br>Distance: {d:.2f}"
+                        f"<br>Overlap score: {overlap:.2f}"
+                    ),
+                    color="rgba(255,255,255,0.25)",
+                    width=1.0 + overlap * 5,
+                    edge_type="similarity",
+                )
+            )
+
+    # --------------------------------------------------------
+    # 7. Treatment recommendation edges
+    # --------------------------------------------------------
+    for node in theory_nodes:
+        coord = {"P": node.x, "B": node.y, "T": node.z}
+        best = best_treatments_for_subtype(coord, treatment_lookup, limit=2)
+
+        for treatment, score, vector in best:
+            target_id = f"TX::{treatment}"
+
+            if target_id not in node_lookup:
+                continue
+
+            edges.append(
+                Edge(
+                    source=node.node_id,
+                    target=target_id,
+                    label=(
+                        f"<b>Treatment vector match</b>"
+                        f"<br>{node.label} → {treatment}"
+                        f"<br>Match score: {score:.2f}"
+                        f"<br>{vector['Mechanism']}"
+                    ),
+                    color="rgba(0,255,255,0.35)",
+                    width=1.0 + score * 4,
+                    edge_type="treatment",
+                )
+            )
 
     return nodes, edges, node_lookup
 
 
-# ============================================================
-# 5. PLOTLY RENDERING
-# ============================================================
-
-def edge_trace(edge, node_lookup):
-    s = node_lookup[edge.source]
-    t = node_lookup[edge.target]
+def make_edge_trace(edge: Edge, node_lookup: Dict[str, Node]):
+    source = node_lookup[edge.source]
+    target = node_lookup[edge.target]
 
     return go.Scatter3d(
-        x=[s.x, t.x, None],
-        y=[s.y, t.y, None],
-        z=[s.z, t.z, None],
+        x=[source.x, target.x, None],
+        y=[source.y, target.y, None],
+        z=[source.z, target.z, None],
         mode="lines",
         hoverinfo="text",
         text=[edge.label, edge.label, None],
@@ -526,8 +517,11 @@ def edge_trace(edge, node_lookup):
     )
 
 
-def node_trace(nodes, node_type, name):
+def make_node_trace(nodes: List[Node], node_type: str, name: str):
     selected = [n for n in nodes if n.node_type == node_type]
+
+    if not selected:
+        return None
 
     return go.Scatter3d(
         x=[n.x for n in selected],
@@ -548,13 +542,13 @@ def node_trace(nodes, node_type, name):
     )
 
 
-def origin_trace():
+def make_origin_trace():
     return go.Scatter3d(
         x=[0],
         y=[0],
         z=[0],
         mode="markers+text",
-        text=["Healthy Origin"],
+        text=["Origin"],
         hovertext=[
             "<b>Healthy Origin</b>"
             "<br>𝒫 = 0"
@@ -565,7 +559,7 @@ def origin_trace():
         hoverinfo="text",
         textposition="bottom center",
         marker=dict(
-            size=8,
+            size=9,
             color="white",
             symbol="diamond",
             line=dict(width=2, color="black"),
@@ -574,11 +568,7 @@ def origin_trace():
     )
 
 
-def axis_shell_trace(radius=3.0, points=40):
-    """
-    Draws a faint sphere around the healthy/pathological zone.
-    This makes distance-from-origin visually meaningful.
-    """
+def make_severity_shell(radius=3.0, points=48):
     u = np.linspace(0, 2 * np.pi, points)
     v = np.linspace(0, np.pi, points)
 
@@ -590,7 +580,7 @@ def axis_shell_trace(radius=3.0, points=40):
         x=x,
         y=y,
         z=z,
-        opacity=0.08,
+        opacity=0.06,
         colorscale="Greys",
         showscale=False,
         hoverinfo="skip",
@@ -601,43 +591,47 @@ def axis_shell_trace(radius=3.0, points=40):
 def build_figure(nodes, edges, node_lookup):
     fig = go.Figure()
 
-    # Draw shell first.
-    fig.add_trace(axis_shell_trace(radius=3.0))
+    fig.add_trace(make_severity_shell(radius=3.0))
 
-    # Draw edges before nodes.
     for edge in edges:
-        fig.add_trace(edge_trace(edge, node_lookup))
+        fig.add_trace(make_edge_trace(edge, node_lookup))
 
-    # Draw node layers.
-    fig.add_trace(node_trace(nodes, "archetype_subtype", "Archetype Subtypes"))
-    fig.add_trace(node_trace(nodes, "neurotransmitter", "Neurotransmitters"))
-    fig.add_trace(node_trace(nodes, "hormone", "Hormones"))
-    fig.add_trace(origin_trace())
+    traces = [
+        make_node_trace(nodes, "archetype", "Archetypes"),
+        make_node_trace(nodes, "clinical", "Clinical Coordinates"),
+        make_node_trace(nodes, "neurochemical", "Neurochemistry"),
+        make_node_trace(nodes, "treatment", "Treatment Vectors"),
+        make_origin_trace(),
+    ]
+
+    for trace in traces:
+        if trace is not None:
+            fig.add_trace(trace)
 
     fig.update_layout(
         title=(
-            "Triadic Neurochemical Archetype Atlas "
+            "Triadic Neurochemical Archetype Atlas"
             "<br><sup>𝒫 Precision × ℬ Boundary × 𝒯 Temporal Horizon</sup>"
         ),
         scene=dict(
             xaxis=dict(
-                title="𝒫 Precision — signal/noise weighting",
-                range=[-3.5, 5.0],
-                backgroundcolor="rgb(18,18,24)",
+                title="𝒫 Precision",
+                range=[-4.0, 5.0],
+                backgroundcolor="rgb(16,16,24)",
                 gridcolor="rgba(255,255,255,0.15)",
                 zerolinecolor="white",
             ),
             yaxis=dict(
-                title="ℬ Boundary — self/world demarcation",
-                range=[-3.5, 5.0],
-                backgroundcolor="rgb(18,18,24)",
+                title="ℬ Boundary",
+                range=[-4.0, 5.0],
+                backgroundcolor="rgb(16,16,24)",
                 gridcolor="rgba(255,255,255,0.15)",
                 zerolinecolor="white",
             ),
             zaxis=dict(
-                title="𝒯 Temporal — past/present/future horizon",
+                title="𝒯 Temporal",
                 range=[-4.0, 4.0],
-                backgroundcolor="rgb(18,18,24)",
+                backgroundcolor="rgb(16,16,24)",
                 gridcolor="rgba(255,255,255,0.15)",
                 zerolinecolor="white",
             ),
@@ -646,7 +640,7 @@ def build_figure(nodes, edges, node_lookup):
         paper_bgcolor="rgb(8,8,12)",
         plot_bgcolor="rgb(8,8,12)",
         font=dict(color="white"),
-        margin=dict(l=0, r=0, b=0, t=70),
+        margin=dict(l=0, r=0, b=0, t=75),
         legend=dict(
             x=0.02,
             y=0.98,
@@ -658,65 +652,17 @@ def build_figure(nodes, edges, node_lookup):
     return fig
 
 
-# ============================================================
-# 6. MAIN BUILD FUNCTION
-# ============================================================
-
-def build_3d_network(
-    csv_path=DEFAULT_CSV,
-    output_html=DEFAULT_OUTPUT,
-):
-    if not os.path.isfile(csv_path):
-        raise FileNotFoundError(f"CSV file not found: {csv_path}")
-
-    df = pd.read_csv(csv_path)
-    df.columns = df.columns.str.strip()
-
-    required = ["Archetype", "Subtype"] + ALL_NH_COLS
-    missing = [col for col in required if col not in df.columns]
-
-    if missing:
-        raise ValueError(f"CSV is missing required columns: {missing}")
-
-    nodes, edges, node_lookup = build_nodes_and_edges(df)
+def build_atlas(output_html: Path = OUTPUT_HTML):
+    archetypes, coords, treatments = load_data()
+    nodes, edges, node_lookup = build_nodes_and_edges(archetypes, coords, treatments)
     fig = build_figure(nodes, edges, node_lookup)
 
     fig.write_html(output_html, auto_open=False)
 
-    print(f"[INFO] Saved enhanced triadic atlas to: {output_html}")
+    print(f"[INFO] Saved atlas: {output_html}")
     print(f"[INFO] Nodes: {len(nodes)}")
     print(f"[INFO] Edges: {len(edges)}")
-    print("[INFO] Coordinate system:")
-    print("       X = 𝒫 Precision")
-    print("       Y = ℬ Boundary")
-    print("       Z = 𝒯 Temporal")
 
-
-# ============================================================
-# 7. SERVER
-# ============================================================
-
-def run_http_server(port=8000):
-    handler = http.server.SimpleHTTPRequestHandler
-
-    with socketserver.TCPServer(("", port), handler) as httpd:
-        print(f"[INFO] Serving HTTP on 0.0.0.0:{port}")
-        print(f"[INFO] Open: http://localhost:{port}/index.html")
-        httpd.serve_forever()
-
-
-# ============================================================
-# 8. ENTRYPOINT
-# ============================================================
 
 if __name__ == "__main__":
-    csv_file = DEFAULT_CSV
-    output_html = DEFAULT_OUTPUT
-
-    try:
-        build_3d_network(csv_file, output_html)
-    except Exception as exc:
-        print(f"[ERROR] {exc}")
-        raise SystemExit(1)
-
-    run_http_server(port=8000)
+    build_atlas()
