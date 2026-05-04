@@ -2,6 +2,9 @@
 
 An interactive 3D Plotly model mapping archetypes, neurochemical dysregulation, and computational psychiatry into a unified coordinate system.
 
+<img width="1404" height="760" alt="image" src="https://github.com/user-attachments/assets/8a93c085-2666-4a25-a9c0-a41c54423f92" />
+
+
 The atlas uses three axes:
 
 ```text
